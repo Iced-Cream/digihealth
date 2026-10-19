@@ -1,7 +1,7 @@
 # digihealth
 
 A performance and diagnostics mod for the Digitakt (mk1), OS 1.53 and 1.54. It adds
-two rows to SETTINGS:
+three rows to SETTINGS:
 
 - **FAST AUDIO** (on by default) runs the audio render's hot code from the
   processor's free on-chip SRAM instead of DDR. It is the same code, so the
@@ -12,6 +12,10 @@ two rows to SETTINGS:
 - **SYSTEM INFO** shows CPU, DSP, RAM and free sample memory in the top bar.
   A read-only USB diagnostics channel lets `tools/digiusb.py` read the same
   figures, and more, from a computer.
+- **REMOTE KEYS** (on at every power-on; Digitakt only for now) lets `tools/digiusb.py keys` press
+  the panel's buttons over USB: see [Remote keys](#remote-keys). Off, the
+  unit refuses key commands and lets go of any key the computer holds;
+  the diagnostics still answer.
 
 On the **Digitone (mk1) and Digitone Keys**, OS 1.43 and 1.44, it is
 SYSTEM INFO alone (digihealth 1.1): see [The Digitone](#the-digitone).
@@ -62,22 +66,27 @@ macOS/Linux (Mido + python-rtmidi). Close Elektron Transfer first on Windows,
 which lets one program at a time open a MIDI port. The client expects one
 Digitakt or Digitone MIDI input and output; it refuses ambiguous matches.
 
-On macOS, from a source checkout with mise and uv installed:
+On macOS and Linux, install the two packages first:
 
 ```bash
-mise exec python@3.12 -- uv run --with mido --with python-rtmidi python tools/digiusb.py stats 10
+pip install mido python-rtmidi
 ```
 
-## Remote keys (source build)
+## Remote keys
 
-This branch supports all 48 Digitakt mk1 buttons on OS 1.53/1.54 and all
+digihealth 1.2 presses all 48 Digitakt mk1 buttons on OS 1.53/1.54 and all
 54 desktop Digitone mk1 buttons on OS 1.44, including encoder pushes.
 Shared names such as `YES`, `SETTINGS`, `1` and `LEVEL_PUSH` use a device-specific
 map. Device-only names such as `SRC`, `SYN1` and `T1` are refused on devices
 that lack them. See [the complete button map](docs/BUTTONS.md).
 
-Build and install the mod from this source before using it; the linked
-upstream releases do not contain this helper. Key protocol revision 2 is
+Releases before 1.2 answer the diagnostics only. The SETTINGS row REMOTE
+KEYS turns the commands off: the unit then answers them with status 6 and
+`digiusb.py` says so. The row is on at every power-on, for now: no core
+yet keeps a mod's setting across power-off. The Digitone has no row yet,
+so its keys are always on: with core-dn1 4.1, a second SETTINGS row (any
+row, even a second SYSTEM INFO) stalls the first boot at FACTORY PROJECT
+>> +DRIVE in digikit's emulator. Key protocol revision 2 is
 required; older clients/helpers refuse the capability mismatch before acting.
 Digitone OS 1.43 retains diagnostics only until its input bridge can be
 verified against that stock file. Digitone Keys extra controls are outside
@@ -86,7 +95,7 @@ this map; the helper refuses that panel variant.
 For example, on Digitakt hold FUNC while tapping SRC:
 
 ```bash
-mise exec python@3.12 -- uv run --with mido --with python-rtmidi python tools/digiusb.py keys 'FUNC(SRC)'
+python tools/digiusb.py keys 'FUNC(SRC)'
 ```
 
 Use a bare name such as `keys YES` to tap alone. `--tap-ms` defaults to 100
@@ -102,7 +111,7 @@ through `H_PUSH`; rotations are outside the button helper.
 Run multiple steps in one session with a comma-separated input:
 
 ```bash
-mise exec python@3.12 -- uv run --with mido --with python-rtmidi python tools/digiusb.py keys 'FUNC(SRC),DOWN,DOWN,DOWN,YES'
+python tools/digiusb.py keys 'FUNC(SRC),DOWN,DOWN,DOWN,YES'
 ```
 
 Commas separate steps. A bare name taps that button; `FUNC(SRC)` holds FUNC,
@@ -255,12 +264,12 @@ them to elekloader's SDK.
 
 ## How it was checked
 
-For the source-build key helper, run the host checks without a MIDI device:
+For the key helper, run the host checks without a MIDI device:
 
 ```bash
-mise exec python@3.12 -- python tests/test_usb_keys.py
-mise exec python@3.12 -- python tests/test_all_keys.py
-mise exec python@3.12 -- python tools/digiusb.py selftest
+python tests/test_usb_keys.py
+python tests/test_all_keys.py
+python tools/digiusb.py selftest
 ```
 
 `tests/test_remote_keys.py` checks the input bridge, and
@@ -272,8 +281,9 @@ The full helper tests cover every mapped firmware key ID, cross-group
 ownership, machine-list/Sound Browser screens, unchanged diagnostic
 replies, USB/DIN source gating, physical ownership, malformed requests,
 lost action replies and deadline cleanup. The emulator calls the router hook
-and captures the stock sender; it does not model USB endpoints. Remote keys
-have not been tested on a physical device.
+and captures the stock sender; it does not model USB endpoints. On a
+Digitakt running OS 1.54, `keys 'FUNC(SRC),DOWN,DOWN,DOWN,YES'` worked, and
+a remote `keys YES` confirmed a firmware update (#6).
 
 The original performance and diagnostics checks below ran in digikit's emulator,
 which runs the stock OS and the
