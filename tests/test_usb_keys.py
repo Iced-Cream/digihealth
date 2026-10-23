@@ -424,6 +424,47 @@ class USBKeys(unittest.TestCase):
             self.port.messages.clear()
 
 
+class USBKeyTable(unittest.TestCase):
+    """RK_KEY_TABLE (the Digitone 1.44 port): positions come from the OS's slot table."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.tmp = tempfile.TemporaryDirectory()
+        cls.addClassCleanup(cls.tmp.cleanup)
+        library = str(Path(cls.tmp.name) / 'table.so')
+        subprocess.run(['cc', '-std=c99', '-Wall', '-Wextra', '-Werror', '-shared', '-fPIC',
+                        '-DRK_PRODUCT=2', '-DRK_OS_MINOR=44', '-DRK_KEY_TABLE',
+                        str(ROOT / 'tests/fixtures/remote_keys_host.c'), '-o', library], check=True)
+        cls.lib = ctypes.CDLL(library)
+        cls.lib.rk_receive.argtypes = (ctypes.c_char_p, ctypes.c_uint, ctypes.c_void_p)
+
+    def setUp(self):
+        self.lib.host_reset()
+        self.port = HostPort(self.lib)
+        self.diag = usb.Diag(self.port)
+
+    def test_every_key_lands_where_keys_def_puts_it(self):
+        with usb.RemoteKeys(self.diag) as keys:
+            self.assertEqual(keys.supported, usb.SUPPORTED[2])
+            for name, (_code, group, mask) in usb.MAPS[2].items():
+                keys.press(name)
+                self.assertEqual(self.lib.host_group(group), mask, name)
+                keys.release(name)
+                self.assertEqual(self.lib.host_group(group), 0, name)
+
+    def test_a_key_missing_from_the_table_is_unsupported(self):
+        self.lib.host_table_drop(usb.MAPS[2]['FUNC'][0])
+        caps = self.diag.call(usb.req_caps)
+        keys = struct.unpack_from('>Q', caps, 5)[0]
+        self.assertEqual(keys, usb.SUPPORTED[2] & ~(1 << (usb.KEYS['FUNC'] - 1)))
+        with self.assertRaisesRegex(ValueError, 'unsupported'):
+            usb.RemoteKeys(self.diag)
+        self.port.send(usb.request(1, usb.OPEN, struct.pack('>I', 7)))
+        self.port.send(usb.request(2, usb.ACTION, struct.pack('>IIBBH', 7, 1, usb.TAP,
+                                                              usb.KEYS['FUNC'], 100)))
+        self.assertEqual(usb.parse(self.port.messages.pop())['status'], 1)
+
+
 class MidiTransport(unittest.TestCase):
     def test_digitone_mido_port_names(self):
         from unittest.mock import Mock

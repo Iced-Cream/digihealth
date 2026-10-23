@@ -80,7 +80,8 @@
     "KEY_STATE": "0x41973dd0",
     "UI_QUEUE": "0x4052b6bc",
     "KEY_CLOCK": "0xfc07000c",
-    "KEY_VARIANT": "0x402296f0"
+    "KEY_VARIANT": "0x402296f0",
+    "KEY_TABLE": "0x41973de4"
    },
    "sites": [
     {
@@ -111,7 +112,8 @@
    ],
    "cflags": [
     "-DRK_OS_MINOR=44",
-    "-DRK_PRODUCT=2"
+    "-DRK_PRODUCT=2",
+    "-DRK_KEY_TABLE"
    ],
    "subscribe": [
     {

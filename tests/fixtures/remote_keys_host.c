@@ -29,6 +29,29 @@ unsigned rk_now(void) { return clock_ticks; }
 #ifndef RK_PRODUCT
 #define RK_PRODUCT 1
 #endif
+#ifdef RK_KEY_TABLE
+/* The OS's slot table as keys.def places each key: one UI ID per slot. */
+static unsigned host_table[7 * 8];
+const unsigned *volatile fw_key_table = host_table;
+static void host_fill_table(void)
+{
+    static const unsigned char pos[][3] = {
+#if RK_PRODUCT == 1
+#define KEY(id, name, dc, dg, dm, nc, ng, nm) {dc, dg, dm},
+#else
+#define KEY(id, name, dc, dg, dm, nc, ng, nm) {nc, ng, nm},
+#endif
+#include "../../keys.def"
+#undef KEY
+    };
+    unsigned i, bit;
+    memset(host_table, 0, sizeof(host_table));
+    for (i = 0; i < sizeof(pos) / sizeof(pos[0]); ++i)
+        for (bit = 0; pos[i][0] && bit < 8; ++bit)
+            if (pos[i][2] == 1u << bit)
+                host_table[pos[i][1] * 8 + bit] = pos[i][0];
+}
+#endif
 #include "../../core_candidate.c"
 #include "../../remote_keys.c"
 
@@ -48,6 +71,12 @@ void host_reset(void)
     rk_off = 0;
     held_key = held_start = held_ticks = tap_start = 0;
     started = tapping = cleanup = closed = 0;
+#ifdef RK_KEY_TABLE
+    host_fill_table();
+    for (unsigned i = 1; i <= RK_KEY_COUNT; ++i)
+        keymap[i].group = keymap[i].mask = 0;
+    located = 0;
+#endif
 }
 void host_advance(unsigned ms) { clock_ticks += ms * TICKS_PER_MS; rk_tick(0); }
 void host_clock(unsigned ticks) { clock_ticks = ticks; }
@@ -60,3 +89,11 @@ unsigned host_group(unsigned group) { return fw_key_state[group]; }
 void host_variant(unsigned flags) { fw_panel_variant = flags; }
 void host_fill_after(unsigned group) { fill_after_group = group; }
 void host_off(unsigned off) { rk_off = off; }
+#ifdef RK_KEY_TABLE
+/* Take a UI ID out of the table, as if the OS had no such key. */
+void host_table_drop(unsigned ui)
+{
+    for (unsigned slot = 0; slot < 7 * 8; ++slot)
+        if (host_table[slot] == ui) host_table[slot] = 0;
+}
+#endif

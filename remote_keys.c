@@ -9,6 +9,40 @@
 #error "RK_PRODUCT must identify the device"
 #endif
 
+#ifdef RK_KEY_TABLE
+/* Only each key's UI ID ships: its panel group and bit come from the OS's own
+ * slot table at run time (locate), one UI ID per slot, slot = 8 group + bit. */
+static struct key_position { unsigned char ui, group, mask; } keymap[RK_KEY_COUNT + 1] = {
+#if RK_PRODUCT == 1
+#define KEY(id, name, dc, dg, dm, nc, ng, nm) [id] = {dc, 0, 0},
+#elif RK_PRODUCT == 2
+#define KEY(id, name, dc, dg, dm, nc, ng, nm) [id] = {nc, 0, 0},
+#else
+#error "Unknown key map"
+#endif
+#include "keys.def"
+#undef KEY
+};
+/* core_candidate.s: the pointer the OS's button driver reads the table through. */
+extern const unsigned *volatile fw_key_table;
+static unsigned located;
+
+static void locate(void)
+{
+    unsigned id, slot;
+    const unsigned *table = fw_key_table;
+    if (located || !table)
+        return;
+    for (id = 1; id <= RK_KEY_COUNT; ++id)
+        for (slot = 0; keymap[id].ui && slot < CORE_KEYS_GROUPS * 8; ++slot)
+            if (table[slot] == keymap[id].ui) {
+                keymap[id].group = slot / 8;
+                keymap[id].mask = 1u << (slot % 8);
+                break;
+            }
+    located = 1;
+}
+#else
 static const struct key_position { unsigned char ui, group, mask; } keymap[RK_KEY_COUNT + 1] = {
 #if RK_PRODUCT == 1
 #define KEY(id, name, dc, dg, dm, nc, ng, nm) [id] = {dc, dg, dm},
@@ -20,6 +54,8 @@ static const struct key_position { unsigned char ui, group, mask; } keymap[RK_KE
 #include "keys.def"
 #undef KEY
 };
+static void locate(void) {}
+#endif
 #if RK_PRODUCT == 2
 extern volatile unsigned fw_panel_variant;
 #endif
@@ -115,6 +151,7 @@ int rk_receive(const unsigned char *packed, unsigned length, unsigned char *repl
     count = command == RK_CAPS ? 3 : command == RK_ACTION ? 15 : command == RK_STATUS ? 11 : 7;
     if (!unpack(packed, length, request, count)) return 4;
     reply[3] = RK_OK;
+    locate();
 #if RK_PRODUCT == 2
     if (fw_panel_variant & 0x80000) {
         reply[3] = RK_INVALID;
@@ -185,9 +222,12 @@ int rk_receive(const unsigned char *packed, unsigned length, unsigned char *repl
 
 void rk_tick(void *ctrl)
 {
-    unsigned sr = core_keys_lock(), now = rk_now(), target, group;
+    unsigned sr, now, target, group;
     int result;
     (void)ctrl;
+    locate();
+    sr = core_keys_lock();
+    now = rk_now();
     /* shortcut: a >32 s UI stall can wrap DTIM0; use a wider clock if required. */
     if ((held_key && now - held_start >= held_ticks) ||
         (state == RK_ACCEPTED && !tapping && now - started >= MAX_HOLD_MS * TICKS_PER_MS))
