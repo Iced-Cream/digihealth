@@ -2,7 +2,8 @@
 """One program on a Digitakt's or Digitone's USB MIDI port: keys, screenshots,
 notes and CCs and the data store, in one session, so a step can look at the
 screen while a key is held. --port NAME (before the command) picks the unit
-by part of its port name when both are connected.
+by part of its port name when both are connected; --port tcp:HOST:PORT talks
+to an emulator's USB MIDI link instead (digiemu's tools/usbrun.py).
 
     python digirun.py shot OUT.png [--scale N]       the screen now (stock OS too)
     python digirun.py run SCRIPT [--out DIR]         steps from a file ('-' = stdin)
@@ -43,6 +44,7 @@ import sys
 import time
 
 import elkrpc
+import midisock
 from digiusb import Diag, RemoteKeys, decode_stats, key_sequence, peek, req_stats
 
 
@@ -202,6 +204,8 @@ class Session:
 
 
 def open_port(name=None):
+    if midisock.is_address(name):
+        return midisock.Port(name)
     if sys.platform == 'win32':
         from winmidi import Port
     else:
@@ -218,7 +222,8 @@ def main(argv=None):
                                  formatter_class=argparse.RawDescriptionHelpFormatter,
                                  epilog=__doc__.split('\n', 1)[1])
     ap.add_argument('--port', default=None,
-                    help="part of the unit's MIDI port name (default: the Digitakt or Digitone)")
+                    help="part of the unit's MIDI port name (default: the Digitakt or Digitone), "
+                         "or tcp:HOST:PORT for an emulator's USB MIDI link")
     sub = ap.add_subparsers(dest='cmd', required=True)
     p = sub.add_parser('shot')
     p.add_argument('out')

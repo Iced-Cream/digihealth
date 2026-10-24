@@ -170,7 +170,8 @@ Steps: `tap`, `hold`, `release`, `keys SEQ` (as `digiusb.py keys`), `turn`,
 tools/digirun.py --help` lists their arguments. Writing to the data store is
 left out on purpose. On the Digitone, give a turn back a pause (`wait 3`)
 after a turn: one sent straight after was sometimes not taken. With both units connected, `--port Digitone` (before the
-command) picks one.
+command) picks one. `--port tcp:127.0.0.1:7311` talks to an emulator's USB MIDI
+link instead (digiemu's `tools/usbrun.py`), with no virtual MIDI ports.
 
 ## The Digitone
 

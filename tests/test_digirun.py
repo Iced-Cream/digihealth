@@ -193,6 +193,63 @@ class SessionTest(unittest.TestCase):
         self.assertIn('\n    +', text)
 
 
+class TcpPortTest(unittest.TestCase):
+    """--port tcp:HOST:PORT: the fake unit behind a local socket, as digiemu's USB MIDI link
+    carries it (raw MIDI bytes both ways, SysEx split across reads)."""
+
+    def setUp(self):
+        import socket
+        import threading
+        self.unit = unit = FakeUnit()
+        self.server = socket.create_server(('127.0.0.1', 0))
+        self.addCleanup(self.server.close)
+        self.got = bytearray()
+
+        def serve():
+            try:
+                talk(*self.server.accept())
+            except OSError:                 # closed by the test
+                pass
+
+        def talk(conn, _addr):
+            with conn:
+                msg = bytearray()
+                while True:
+                    data = conn.recv(4096)
+                    if not data:
+                        return
+                    self.got += data
+                    for b in data:
+                        msg.append(b)
+                        if b == 0xF7:
+                            unit.send(bytes(msg[msg.index(0xF0):]))
+                            msg.clear()
+                    for reply in unit.pending:
+                        conn.sendall(b'\xF8' + reply[:7])     # a clock byte, then a split reply
+                        conn.sendall(reply[7:])
+                    unit.pending = []
+        self.thread = threading.Thread(target=serve, daemon=True)
+        self.thread.start()
+        self.address = 'tcp:127.0.0.1:%d' % self.server.getsockname()[1]
+
+    def test_info_and_a_cc(self):
+        port = digirun.open_port(self.address)
+        try:
+            s = digirun.Session(port)
+            self.assertEqual(s.rpc.version(), '1.44')
+            self.assertEqual(s.rpc.screenshot().lit(), 128 + 64)
+            s.cc(1, 74, 64)
+        finally:
+            port.close()
+        self.thread.join(5)
+        self.assertTrue(self.got.endswith(bytes([0xB0, 74, 64])))
+
+    def test_nothing_listening(self):
+        self.server.close()
+        with self.assertRaisesRegex(OSError, 'cannot connect to tcp:'):
+            digirun.open_port(self.address)
+
+
 class CommandTest(unittest.TestCase):
     def setUp(self):
         self.unit = unit = FakeUnit()
