@@ -48,9 +48,14 @@ class _OutCaps(ctypes.Structure):
 def find(name=None):
     ins = _names(winmm.midiInGetNumDevs, winmm.midiInGetDevCapsW, _InCaps)
     outs = _names(winmm.midiOutGetNumDevs, winmm.midiOutGetDevCapsW, _OutCaps)
-    names = (name.lower(),) if name else ('digitakt', 'digitone')
-    i = [k for k, n in enumerate(ins) if any(part in n.lower() for part in names)]
-    o = [k for k, n in enumerate(outs) if any(part in n.lower() for part in names)]
+    if name and ',' in name:                    # IN,OUT: ports named apart (a MIDI interface)
+        a, b = (x.strip().lower() for x in name.split(',', 1))
+        i = [k for k, n in enumerate(ins) if a in n.lower()]
+        o = [k for k, n in enumerate(outs) if b in n.lower()]
+    else:
+        names = (name.lower(),) if name else ('digitakt', 'digitone')
+        i = [k for k, n in enumerate(ins) if any(part in n.lower() for part in names)]
+        o = [k for k, n in enumerate(outs) if any(part in n.lower() for part in names)]
     if len(i) != 1 or len(o) != 1:
         raise OSError('expected one %s MIDI port pair (ports: %s). Is it connected over USB and '
                       'switched on, with USB CONFIG set to USB MIDI or Overbridge?'

@@ -3,7 +3,10 @@
 notes and CCs and the data store, in one session, so a step can look at the
 screen while a key is held. --port NAME (before the command) picks the unit
 by part of its port name when both are connected; --port tcp:HOST:PORT talks
-to an emulator's USB MIDI link instead (digiemu's tools/usbrun.py).
+to an emulator's USB MIDI link instead (digiemu's tools/usbrun.py). --din PORT,
+in the same forms (or IN,OUT for an interface whose two ports are named apart),
+names the MIDI interface cabled to the unit's DIN ports, or an emulator's DIN
+MIDI link (usbrun.py --din-port), for send and capture with a trailing din.
 
     python digirun.py shot OUT.png [--scale N]       the screen now (stock OS too)
     python digirun.py run SCRIPT [--out DIR]         steps from a file ('-' = stdin)
@@ -34,12 +37,14 @@ Steps (one per line or separated by ';'; '#' starts a comment):
     wait S
     stats                 one digihealth CPU/DSP/heap line
     dump ADDR LEN FILE    DDR to a file (digihealth)
-    send FILE             pattern, kit or sound dumps (a .syx) to the unit
-    capture FILE S [any|none]  listen S seconds, then save every SysEx the unit sent
+    send FILE [din]       pattern, kit or sound dumps (a .syx) to the unit; din: into its
+                          DIN MIDI input (--din), the write policy still asked over USB
+    capture FILE S [any|none] [din]  listen S seconds, then save every SysEx the unit sent
                           since the last send (or since this step) to FILE, the session's
                           own RPC and diagnostics traffic left out; FILE is written even
                           when nothing came. any: stop unless something came; none: stop
-                          if anything came
+                          if anything came. din: what came out of its DIN MIDI output
+                          (since the last send ... din, or since the port was opened)
     ping                  the unit's product, name and OS version (RPC Ping, read-only)
     save-project N NAME SEQ   keys SEQ save the project into empty slot N (the
                           naming screen's YES ends it); then it is renamed NAME
@@ -182,8 +187,9 @@ def mark(s, path, name):
 class Session:
     unit = 'digitone'                    # for a write policy shared with analoghealth
 
-    def __init__(self, port, out='.'):
+    def __init__(self, port, out='.', din=None):
         self.port = Tap(port)
+        self.din = Tap(din) if din is not None else None     # the DIN MIDI port (--din)
         self.rpc = elkrpc.Rpc(self.port)
         self.diag = Diag(self.port)
         self.out = out
@@ -214,10 +220,18 @@ class Session:
             if not dumps and time.monotonic() >= end:
                 raise TimeoutError('no dump arrived')
 
-    def send_dump(self, msgs, gap=0.05):
+    def send_dump(self, msgs, gap=0.05, port=None):
         for m in msgs:
-            self.port.send(m)
+            (port or self.port).send(m)
             time.sleep(gap)
+
+    def leg(self, a, least):
+        """A send/capture step's words -> (its Tap, the words without a trailing din)."""
+        if len(a) > least and a[-1].lower() == 'din':
+            if self.din is None:
+                raise ValueError('din: no DIN MIDI port (give --din PORT)')
+            return self.din, a[:-1]
+        return self.port, a
 
     @property
     def keys(self):
@@ -385,25 +399,28 @@ class Session:
                 fh.write(data)
         elif op == 'send':
             # Pattern, kit and sound dumps land in the active project: the write policy is asked first
+            tap, a = self.leg(a, 1)
             msgs = load_syx(self.path(a[0]))
             if not msgs or not all(is_dump(m) for m in msgs):
                 raise ValueError('%s holds messages other than Elektron dumps' % a[0])
-            writepolicy.before_dumps(self, msgs)
-            self.port.since = []             # a capture step after this keeps the replies
-            self.send_dump(msgs)
-            say('  sent %d messages, %d bytes' % (len(msgs), sum(map(len, msgs))))
+            writepolicy.before_dumps(self, msgs)     # over USB RPC, whichever port sends
+            tap.since = []                   # a capture step after this keeps the replies
+            self.send_dump(msgs, port=tap)
+            say('  sent %d messages, %d bytes%s' % (len(msgs), sum(map(len, msgs)),
+                                                    ' over DIN' if tap is self.din else ''))
         elif op == 'capture':
-            # capture FILE S [any|none]: the replies to a send, or the silence, as evidence
+            # capture FILE S [any|none] [din]: the replies to a send, or the silence, as evidence
+            tap, a = self.leg(a, 2)
             want = a[2].lower() if len(a) > 2 else None
             if want not in (None, 'any', 'none') or len(a) > 3:
-                raise ValueError('capture FILE S [any|none]')
-            if self.port.since is None:
-                self.port.since = []
+                raise ValueError('capture FILE S [any|none] [din]')
+            if tap.since is None:
+                tap.since = []
             end = time.monotonic() + float(a[1])
             while time.monotonic() < end:
-                self.port.receive(min(0.05, max(end - time.monotonic(), 0)))
-            got = [m for m in self.port.since if m[:1] == b'\xF0' and not ours(m)]
-            self.port.since = []             # the next capture keeps only what comes after
+                tap.receive(min(0.05, max(end - time.monotonic(), 0)))
+            got = [m for m in tap.since if m[:1] == b'\xF0' and not ours(m)]
+            tap.since = []                   # the next capture keeps only what comes after
             save_syx(self.path(a[0]), got)
             say('  captured %d messages, %d bytes' % (len(got), sum(map(len, got))))
             if want == 'any' and not got:
@@ -497,6 +514,9 @@ def main(argv=None):
     ap.add_argument('--port', default=None,
                     help="part of the unit's MIDI port name (default: the Digitakt or Digitone), "
                          "or tcp:HOST:PORT for an emulator's USB MIDI link")
+    ap.add_argument('--din', default=None,
+                    help="the MIDI port cabled to the unit's DIN ports (name, IN,OUT or tcp:HOST:PORT), "
+                         "for send/capture ... din")
     sub = ap.add_subparsers(dest='cmd', required=True)
     p = sub.add_parser('shot')
     p.add_argument('out')
@@ -517,7 +537,12 @@ def main(argv=None):
         ap.error('data get needs an output file')
 
     port = open_port(args.port)
-    s = Session(port, args.out if args.cmd in ('run', 'do') else '.')
+    try:
+        din = open_port(args.din) if args.din else None
+    except OSError:
+        port.close()
+        raise
+    s = Session(port, args.out if args.cmd in ('run', 'do') else '.', din)
     try:
         if args.cmd == 'shot':
             screen = s.shot(args.out, args.scale)
@@ -561,6 +586,8 @@ def main(argv=None):
             s.close()
         finally:
             port.close()
+            if din is not None:
+                din.close()
 
 
 if __name__ == '__main__':

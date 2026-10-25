@@ -306,6 +306,25 @@ class SessionTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, r'capture FILE S \[any\|none\]'):
             self.s.step('capture x.syx 1 some')
 
+    def test_din_legs(self):
+        din = FakeUnit()                    # the DIN port: answers the dump request there only
+        s = digirun.Session(self.unit, self.tmp.name, din)
+        Path(self.tmp.name, 'req.syx').write_bytes(unitdata.dump_request(unitdata.PATTERN_REQUEST, 0))
+        with contextlib.redirect_stdout(io.StringIO()) as out:
+            s.run('send req.syx din; capture usb.syx 0.1 none; capture din.syx 0.1 any din')
+        self.assertIn('sent 1 messages, 15 bytes over DIN', out.getvalue())
+        self.assertEqual(self.unit.dumps_in, [])
+        self.assertEqual(digirun.load_syx(Path(self.tmp.name, 'din.syx')), [din.pattern])
+        # A capture on DIN keeps what came before it there too: a USB send arms only USB.
+        din.pending.append(din.pattern)
+        with contextlib.redirect_stdout(io.StringIO()):
+            s.run('send req.syx; capture usb2.syx 0.1 any; capture din2.syx 0.1 din')
+        self.assertEqual(digirun.load_syx(Path(self.tmp.name, 'din2.syx')), [din.pattern])
+        with self.assertRaisesRegex(ValueError, r'capture FILE S \[any\|none\] \[din\]'):
+            s.step('capture x.syx 1 some din')
+        with self.assertRaisesRegex(ValueError, 'no DIN MIDI port'):
+            self.s.step('send req.syx din')
+
     def test_ping_step(self):
         with contextlib.redirect_stdout(io.StringIO()) as out:
             self.s.step('ping')
@@ -430,6 +449,12 @@ class CommandTest(unittest.TestCase):
         self.assertEqual(rc, 0)
         self.assertTrue(Path(self.tmp.name, 'x.bin').exists())
         self.assertTrue(out.endswith('hi\ndone\n'))
+
+    def test_din_port_is_opened_and_closed(self):
+        rc, _ = self.main('--din', 'tcp:127.0.0.1:1', 'do', 'say hi', '--out', self.tmp.name)
+        self.assertEqual(rc, 0)
+        self.assertEqual(self.names, [None, 'tcp:127.0.0.1:1'])
+        self.assertTrue(self.unit.closed)
 
     def test_bad_arguments_open_no_port(self):
         with self.assertRaises(SystemExit), contextlib.redirect_stderr(io.StringIO()):

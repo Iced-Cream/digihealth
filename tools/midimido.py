@@ -8,17 +8,21 @@ class Port:
         import mido
         self.mido = mido
         wanted = (name.lower(),) if name else ('digitakt', 'digitone')
+        if name and ',' in name:                # IN,OUT: ports named apart (a MIDI interface)
+            want_in, want_out = ((x.strip().lower(),) for x in name.split(',', 1))
+        else:
+            want_in = want_out = wanted
 
-        def choose(names):
+        def choose(names, wanted):
             matches = [n for n in names if any(product in n.lower() for product in wanted)]
             if len(matches) != 1:
                 raise OSError('Expected one %s port; found %r. Available: %r'
                               % (name or 'Digitakt/Digitone', matches, names))
             return matches[0]
 
-        self.incoming = mido.open_input(choose(mido.get_input_names()))
+        self.incoming = mido.open_input(choose(mido.get_input_names(), want_in))
         try:
-            self.outgoing = mido.open_output(choose(mido.get_output_names()))
+            self.outgoing = mido.open_output(choose(mido.get_output_names(), want_out))
         except Exception:
             self.incoming.close()
             raise
