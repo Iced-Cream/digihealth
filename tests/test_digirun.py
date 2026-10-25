@@ -251,6 +251,26 @@ class SessionTest(unittest.TestCase):
         self.assertEqual(self.unit.dumps_in[-1][6], 0x53)
         writepolicy._loaded.clear()
 
+    def test_capture_keeps_the_replies_to_a_send(self):
+        Path(self.tmp.name, 'req.syx').write_bytes(unitdata.dump_request(unitdata.PATTERN_REQUEST, 0))
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.s.run('send req.syx; shot a.png; capture reply.syx 0.1 any')
+            self.assertEqual(digirun.load_syx(Path(self.tmp.name, 'reply.syx')), [self.unit.pattern])  # no RPC
+            with self.assertRaisesRegex(AssertionError, 'no SysEx came back'):     # nothing more came
+                self.s.step('capture again.syx 0.1 any')
+            self.assertEqual(Path(self.tmp.name, 'again.syx').read_bytes(), b'')
+            self.s.step('capture quiet.syx 0.1 none')
+            self.s.step('send req.syx')
+            with self.assertRaisesRegex(AssertionError, r'1 SysEx message\(s\) came back'):
+                self.s.step('capture loud.syx 0.1 none')
+        with self.assertRaisesRegex(ValueError, r'capture FILE S \[any\|none\]'):
+            self.s.step('capture x.syx 1 some')
+
+    def test_ping_step(self):
+        with contextlib.redirect_stdout(io.StringIO()) as out:
+            self.s.step('ping')
+        self.assertIn("ping: product 0x14 'Digitone', OS 1.44", out.getvalue())
+
     def test_unknown_step(self):
         with self.assertRaises(ValueError):
             self.s.step('jump 3')
