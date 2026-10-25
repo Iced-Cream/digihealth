@@ -20,9 +20,14 @@ Steps (one per line or separated by ';'; '#' starts a comment):
     keys SEQ              as digiusb.py keys: 'SETTINGS,DOWN,FUNC(YES)'
     turn ENC DELTA [STEP] encoder turn, where the digihealth build has them
     shot FILE             screenshot: .png (4x) or .bin (raw framebuffer)
-    expect-screen NAME [S]  stop unless the screen equals NAME.bin, retrying for S
+    expect-screen NAME [S] [rows=A-B] [settle]
+                          stop unless the screen equals NAME.bin, retrying for S
                           seconds; a mismatch reports the differing rows and columns
-                          and saves NAME-got.png and NAME-diff.png
+                          and saves NAME-got.png and NAME-diff.png. rows=A-B compares
+                          rows A..B only; settle: a match must still hold 0.4 s later
+    listen TEXT           the person listens for TEXT: nothing is sent until they have
+                          finished (Enter; or, with DIGIRUN_LISTEN_FILE or
+                          ANALOGRUN_LISTEN_FILE set, until a host removes that file)
     cc CH NUM VAL         MIDI channel 1-16
     nrpn CH MSB LSB VAL   VAL 0-16383 (CC 99, 98, 6, 38)
     note CH NOTE VEL [MS] note on, off after MS (default 100)
@@ -38,6 +43,7 @@ only user of the port while it runs: close Transfer, Overbridge's MIDI and
 digiusb.py first.
 """
 import argparse
+import json
 import os
 import shlex
 import sys
@@ -53,10 +59,12 @@ def say(*args, **kw):
     print(*args, **kw)
 
 
-def screen_diff(got, want, w=128, h=64):
-    """Two framebuffers -> (differing pixels as (y, x), a short text report)."""
+def screen_diff(got, want, w=128, h=64, rows=None):
+    """Two framebuffers -> (differing pixels as (y, x), a short text report); rows=(A, B)
+    compares only rows A..B."""
     g, r = elkrpc.Screen(w, h, got).rows(), elkrpc.Screen(w, h, want).rows()
-    diff = [(y, x) for y in range(h) for x in range(w) if g[y][x] != r[y][x]]
+    y_lo, y_hi = rows or (0, h - 1)
+    diff = [(y, x) for y in range(y_lo, y_hi + 1) for x in range(w) if g[y][x] != r[y][x]]
     if not diff:
         return diff, 'identical'
     ys, xs = [d[0] for d in diff], [d[1] for d in diff]
@@ -87,6 +95,8 @@ class Session:
         self.rpc = elkrpc.Rpc(port)
         self.diag = Diag(port)
         self.out = out
+        self.refs = None                 # folder of reference screens (.bin), for test plans
+        self.record_refs = False         # expect-screen saves the screen as the reference
         self._keys = None
 
     @property
@@ -129,18 +139,39 @@ class Session:
             if hold:
                 self.keys.release(hold)
 
-    def expect_screen(self, ref, wait=0.0):
-        """Stop unless the screen equals the framebuffer in `ref`, retrying for `wait` s."""
+    def expect_screen(self, ref, wait=0.0, rows=None, settle=False):
+        """Stop unless the screen equals the framebuffer in `ref` (in the refs folder if set),
+        retrying for `wait` s; rows=(A, B) compares only those rows; settle: a match counts
+        only when it still holds 0.4 s later. With record_refs, save the screen as `ref`."""
         ref = ref if ref.endswith('.bin') else ref + '.bin'
-        with open(self.path(ref), 'rb') as fh:
-            want = fh.read()
+        refpath = os.path.join(self.refs, ref) if self.refs and not os.path.isabs(ref) else self.path(ref)
         got = self.rpc.screenshot()
+        if self.record_refs:
+            os.makedirs(os.path.dirname(refpath) or '.', exist_ok=True)
+            with open(refpath, 'wb') as fh:
+                fh.write(got.pixels)
+            with open(os.path.splitext(refpath)[0] + '.png', 'wb') as fh:
+                fh.write(got.png(4))
+            say('  recorded %s' % refpath)
+            return
+        with open(refpath, 'rb') as fh:
+            want = fh.read()
         end = time.monotonic() + wait
-        while got.pixels != want and time.monotonic() < end:
-            time.sleep(0.2)
+
+        def same(g):
+            return g.pixels == want if rows is None else not screen_diff(g.pixels, want, g.w, g.h, rows)[0]
+        while True:
+            while not same(got) and time.monotonic() < end:
+                time.sleep(0.2)
+                got = self.rpc.screenshot()
+            if not settle or not same(got):
+                break
+            time.sleep(0.4)
             got = self.rpc.screenshot()
-        if got.pixels != want:
-            diff, text = screen_diff(got.pixels, want, got.w, got.h)
+            if same(got) or time.monotonic() >= end:
+                break
+        if not same(got):
+            diff, text = screen_diff(got.pixels, want, got.w, got.h, rows)
             stem = self.path(os.path.splitext(os.path.basename(ref))[0])
             with open(stem + '-got.png', 'wb') as fh:
                 fh.write(got.png(4))
@@ -171,7 +202,17 @@ class Session:
             s = self.shot(a[0])
             say('  %s: %dx%d, %d lit' % (a[0], s.w, s.h, s.lit()))
         elif op == 'expect-screen':
-            self.expect_screen(a[0], float(a[1]) if len(a) > 1 else 0.0)
+            settle = 'settle' in a[1:]
+            opts = [w for w in a[1:] if w.startswith('rows=')]
+            a = a[:1] + [w for w in a[1:] if w != 'settle' and not w.startswith('rows=')]
+            rows = None
+            if opts:
+                try:
+                    rows = tuple(int(v) for v in opts[0][5:].split('-'))
+                    assert len(rows) == 2 and 0 <= rows[0] <= rows[1] <= 63
+                except (ValueError, AssertionError):
+                    raise ValueError('rows=A-B with 0 <= A <= B <= 63, not %r' % opts[0])
+            self.expect_screen(a[0], float(a[1]) if len(a) > 1 else 0.0, rows, settle)
         elif op == 'cc':
             self.cc(*map(num, a))
         elif op == 'nrpn':
@@ -191,6 +232,22 @@ class Session:
                 fh.write(data)
         elif op == 'say':
             say(' '.join(a))
+        elif op == 'listen':
+            # The person listens to the unit: nothing more is sent until they say they have
+            # finished, however long that takes.
+            self.close()                     # no synthetic key stays held meanwhile
+            what = ' '.join(a)
+            say('  listening: %s' % what)
+            flag = os.environ.get('DIGIRUN_LISTEN_FILE') or os.environ.get('ANALOGRUN_LISTEN_FILE')
+            if flag:
+                # A host that asks the person itself: it removes the file when they have finished.
+                with open(flag, 'w', encoding='utf-8') as fh:
+                    json.dump({'what': what, 'since': time.time()}, fh)
+                while os.path.exists(flag):
+                    time.sleep(0.5)
+            else:
+                input('  press Enter when you have finished listening ')
+            say('  finished listening')
         else:
             raise ValueError('unknown step %r' % op)
 

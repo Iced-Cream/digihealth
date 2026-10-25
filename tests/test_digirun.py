@@ -11,6 +11,7 @@ import struct
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / 'tools'))
@@ -176,6 +177,27 @@ class SessionTest(unittest.TestCase):
         self.assertEqual(events, [('press', 'FUNC', 1500), ('rpc',), ('release', 'FUNC'),
                                   ('press', 'FUNC', None), ('tap', 'YES'), ('release', 'FUNC'),
                                   ('turn', 'A', -12, 4), ('cancel',)])
+
+    def test_plan_screen_options(self):
+        refs = Path(self.tmp.name, 'refs')
+        self.s.refs, self.s.record_refs = str(refs), True
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.s.step('expect-screen home 5 settle')
+        self.assertTrue((refs / 'home.bin').exists() and (refs / 'home.png').exists())
+        self.s.record_refs = False
+        self.s.step('expect-screen home 1 settle')        # found in the refs folder, and it holds
+        self.s.step('expect-screen home rows=0-63')
+        with self.assertRaisesRegex(ValueError, 'rows=A-B'):
+            self.s.step('expect-screen home rows=9-3')
+
+    def test_listen_waits_for_the_host(self):
+        flag = Path(self.tmp.name, 'listen.json')
+        import threading
+        threading.Timer(0.6, lambda: flag.unlink()).start()
+        with mock.patch.dict(os.environ, {'DIGIRUN_LISTEN_FILE': str(flag)}), \
+                contextlib.redirect_stdout(io.StringIO()) as out:
+            self.s.step('listen the pad rings')
+        self.assertIn('finished listening', out.getvalue())
 
     def test_unknown_step(self):
         with self.assertRaises(ValueError):
