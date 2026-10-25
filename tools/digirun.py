@@ -34,7 +34,13 @@ Steps (one per line or separated by ';'; '#' starts a comment):
     wait S
     stats                 one digihealth CPU/DSP/heap line
     dump ADDR LEN FILE    DDR to a file (digihealth)
+    send FILE             pattern, kit or sound dumps (a .syx) to the unit
+    save-project N NAME SEQ   keys SEQ save the project into empty slot N (the
+                          naming screen's YES ends it); then it is renamed NAME
     say TEXT              print TEXT
+
+send and save-project ask the local write policy first (writepolicy.py: the
+same policy file as analoghealth's), as data store writes do.
 
 Screenshots and the data store use Elektron's own RPC (elkrpc.py), which the
 stock OS answers. Key steps open a digihealth key session on first use and
@@ -51,7 +57,11 @@ import time
 
 import elkrpc
 import midisock
+import unitdata
+import writepolicy
 from digiusb import Diag, RemoteKeys, decode_stats, key_sequence, peek, req_stats
+
+ELEKTRON = bytes([0xF0, 0x00, 0x20, 0x3C])
 
 
 def say(*args, **kw):
@@ -89,15 +99,103 @@ def diff_png(w, h, diff):
     return elkrpc.Screen(w, h, pixels).png(4)
 
 
-class Session:
-    def __init__(self, port, out='.'):
+class Tap:
+    """The Port, keeping every SysEx that arrives so a dump sent while another
+    request waits for its reply is not lost."""
+
+    def __init__(self, port):
         self.port = port
-        self.rpc = elkrpc.Rpc(port)
-        self.diag = Diag(port)
+        self.seen = []
+
+    def send(self, data):
+        self.port.send(data)
+
+    def send_short(self, *data):
+        self.port.send_short(*data)
+
+    def receive(self, seconds=1.0, until=None):
+        msgs = self.port.receive(seconds, until)
+        self.seen.extend(msgs)
+        return msgs
+
+    def close(self):
+        self.port.close()
+
+
+def is_dump(m):
+    """Elektron SysEx that is neither the RPC channel nor digihealth's."""
+    return m.startswith(ELEKTRON) and not m.startswith(elkrpc.HEADER) and m[4:6] != b'\x7d\x00'
+
+
+def load_syx(path):
+    with open(path, 'rb') as fh:
+        data = fh.read()
+    out, at = [], 0
+    while True:
+        s = data.find(b'\xF0', at)
+        e = data.find(b'\xF7', s)
+        if s < 0 or e < 0:
+            return out
+        out.append(data[s:e + 1])
+        at = e + 1
+
+
+def mark(s, path, name):
+    """Give a just-saved item its name and confirm it in the listing; no name
+    (none asked for or given by the policy): leave it as it is."""
+    if name is None:
+        return
+    end = time.monotonic() + 120                     # the emulator takes over a minute to write one
+    while True:
+        try:
+            unitdata.rename(s.rpc, path, name)       # no answer while the unit still writes the save
+            break
+        except TimeoutError:
+            if time.monotonic() > end:
+                raise
+    now, _ = unitdata.target(s.rpc, path)
+    if now != name:
+        raise unitdata.DataError('%s should be named %r but lists as %r' % (path, name, now))
+
+
+class Session:
+    unit = 'digitone'                    # for a write policy shared with analoghealth
+
+    def __init__(self, port, out='.'):
+        self.port = Tap(port)
+        self.rpc = elkrpc.Rpc(self.port)
+        self.diag = Diag(self.port)
         self.out = out
         self.refs = None                 # folder of reference screens (.bin), for test plans
         self.record_refs = False         # expect-screen saves the screen as the reference
         self._keys = None
+
+    def dump_request(self, kind, number=0):
+        return unitdata.dump_request(kind, number)
+
+    def capture(self, keys=None, request=None, wait=30.0, quiet=1.0):
+        """Start a dump (keys on the unit, or a raw request) and collect it: every
+        Elektron dump message until none has come for `quiet` s."""
+        self.port.seen.clear()
+        if request:
+            self.port.send(request)
+        if keys:
+            self.key_steps(keys)
+        end, last = time.monotonic() + wait, None
+        while True:
+            self.port.receive(0.05)
+            dumps = [m for m in self.port.seen if is_dump(m)]
+            if dumps and last != len(dumps):
+                last, quiet_end = len(dumps), time.monotonic() + quiet
+            if dumps and time.monotonic() >= quiet_end:
+                return dumps
+            if not dumps and time.monotonic() >= end:
+                raise TimeoutError('no dump arrived')
+
+    def send_dump(self, msgs, gap=0.05):
+        for m in msgs:
+            self.port.send(m)
+            time.sleep(gap)
 
     @property
     def keys(self):
@@ -107,7 +205,10 @@ class Session:
 
     def close(self):
         if self._keys is not None:
-            self._keys.cancel()
+            try:
+                self._keys.cancel()
+            except TimeoutError as e:           # e.g. the unit still busy saving: keep the first error
+                say('  closing the key session: %s' % e)
             self._keys = None
 
     def path(self, name):
@@ -230,6 +331,46 @@ class Session:
             data = peek(self.diag, num(a[0]), num(a[1]))
             with open(self.path(a[2]), 'wb') as fh:
                 fh.write(data)
+        elif op == 'send':
+            # Pattern, kit and sound dumps land in the active project: the write policy is asked first
+            msgs = load_syx(self.path(a[0]))
+            if not msgs or not all(is_dump(m) for m in msgs):
+                raise ValueError('%s holds messages other than Elektron dumps' % a[0])
+            writepolicy.before_dumps(self, msgs)
+            self.send_dump(msgs)
+            say('  sent %d messages, %d bytes' % (len(msgs), sum(map(len, msgs))))
+        elif op == 'save-project':
+            # save-project N NAME SEQ: SEQ ends on the unit's save (its naming screen's YES);
+            # the new project is then renamed NAME over the data store.
+            path = '/projects/%d' % num(a[0])
+            name = writepolicy.check_write(self.rpc, path, a[1])
+            if unitdata.target(self.rpc, path)[0] is not None:
+                note = writepolicy.before_save_project(self, path)
+                if note:
+                    say('  ' + note)
+            held, _ = unitdata.target(self.rpc, path)
+            if held is not None:
+                raise unitdata.DataError('%s holds %r: save-project needs an empty slot' % (path, held))
+            try:
+                self.key_steps(' '.join(a[2:]))
+            except TimeoutError:
+                # The save's YES: the unit answers nothing (keys, RPC) until the project is written
+                say('  the unit stopped answering after the keys: waiting for the save')
+            end = time.monotonic() + 120             # the emulator takes over a minute to write one
+            while True:
+                try:
+                    if unitdata.target(self.rpc, path)[0] is not None:
+                        break
+                except TimeoutError:
+                    pass
+                if time.monotonic() > end:
+                    raise unitdata.DataError('%s still empty 120 s after the keys: check the unit' % path)
+                time.sleep(0.5)
+            mark(self, path, name)
+            say('  %s saved, named %r' % (path, name))
+            note = writepolicy.after_save_project(self, path, name)
+            if note:
+                say('  ' + note)
         elif op == 'say':
             say(' '.join(a))
         elif op == 'listen':
@@ -334,6 +475,12 @@ def main(argv=None):
                 fh.write(data)
             say('\n%s: %d bytes' % (args.file, len(data)))
         return 0
+    except writepolicy.Refused as e:
+        say('refused (write policy): %s' % e)
+        return 2
+    except unitdata.DataError as e:
+        say('refused: %s' % e)
+        return 2
     finally:
         try:
             s.close()

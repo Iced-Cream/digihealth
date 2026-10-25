@@ -17,7 +17,19 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / 'tools'))
 import elkrpc
 import digirun
+import unitdata
+import writepolicy
 from digiusb import pack7, unpack7
+
+
+def make_pattern(name, number=0):
+    """A stored-pattern dump (0x50) of an empty pattern named `name`."""
+    body = bytearray(18432)
+    body[unitdata.PATTERN_NAME_AT:unitdata.PATTERN_NAME_AT + 16] = name.encode().ljust(16, b'\0')
+    data = pack7(bytes(body))
+    cs = sum(data) & 0x3FFF
+    return (unitdata.DUMP_HEADER + bytes([unitdata.PATTERN, 1, 1, number]) + data
+            + bytes([cs >> 7, cs & 0x7F, 0x3B, 0x3C, 0xF7]))
 
 
 class FakeUnit:
@@ -30,6 +42,8 @@ class FakeUnit:
         self.jobs = {}
         self.block = block
         self.closed = False
+        self.dumps_in = []
+        self.pattern = make_pattern('IMAGINE')
         w, h = 128, 64
         cols = [(1 << 63) | (x & 1) for x in range(w)]     # row 0 = LSB, row 63 = top bit
         self.pixels = b''.join(c.to_bytes(8, 'big') for c in cols)
@@ -37,6 +51,11 @@ class FakeUnit:
     # --- the port interface ---------------------------------------------------
     def send(self, data):
         data = bytes(data)
+        if data.startswith(unitdata.DUMP_HEADER):
+            self.dumps_in.append(data)
+            if data[6] == unitdata.PATTERN_REQUEST:          # stored pattern n: the one we hold
+                self.pending.append(self.pattern)
+            return
         r = elkrpc.parse(data)
         if r is None:
             return
@@ -198,6 +217,39 @@ class SessionTest(unittest.TestCase):
                 contextlib.redirect_stdout(io.StringIO()) as out:
             self.s.step('listen the pad rings')
         self.assertIn('finished listening', out.getvalue())
+
+    def test_pattern_names(self):
+        p = make_pattern('IMAGINE', 3)
+        self.assertEqual(unitdata.pattern_name(p), 'IMAGINE')
+        q = unitdata.renamed_pattern_dump(p, '~T IMAGINE')
+        self.assertEqual(unitdata.pattern_name(q), '~T IMAGINE')
+        self.assertEqual(q[:10], p[:10])
+        cs = sum(q[10:-5]) & 0x3FFF
+        self.assertEqual(q[-5:-3], bytes([cs >> 7, cs & 0x7F]))
+        with self.assertRaises(unitdata.DataError):
+            unitdata.kit_name(p)
+        self.assertTrue(unitdata.is_kit_dump(p))
+
+    def test_send_asks_the_write_policy(self):
+        policy = Path(self.tmp.name, 'policy.py')
+        policy.write_text(
+            'import unitdata\nfrom writepolicy import Refused\n'
+            'def before_dumps(session, msgs):\n'
+            '    assert session.unit == "digitone"\n'
+            '    p = session.capture(request=session.dump_request(unitdata.PATTERN_REQUEST, 0), wait=1, quiet=0)\n'
+            '    if not unitdata.pattern_name(p[0]).startswith("~T"):\n'
+            '        raise Refused("not a test project")\n')
+        Path(self.tmp.name, 'snd.syx').write_bytes(unitdata.DUMP_HEADER + bytes([0x53, 1, 1, 0, 1, 2, 0, 0, 0, 0xF7]))
+        writepolicy._loaded.clear()
+        with mock.patch.dict(os.environ, {'ANALOGHEALTH_POLICY': str(policy)}), \
+                contextlib.redirect_stdout(io.StringIO()):
+            with self.assertRaisesRegex(writepolicy.Refused, 'not a test project'):
+                self.s.step('send snd.syx')
+            self.assertEqual([d[6] for d in self.unit.dumps_in], [unitdata.PATTERN_REQUEST])
+            self.unit.pattern = make_pattern('~T IMAGINE')
+            self.s.step('send snd.syx')
+        self.assertEqual(self.unit.dumps_in[-1][6], 0x53)
+        writepolicy._loaded.clear()
 
     def test_unknown_step(self):
         with self.assertRaises(ValueError):
