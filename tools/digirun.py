@@ -35,6 +35,12 @@ Steps (one per line or separated by ';'; '#' starts a comment):
     stats                 one digihealth CPU/DSP/heap line
     dump ADDR LEN FILE    DDR to a file (digihealth)
     send FILE             pattern, kit or sound dumps (a .syx) to the unit
+    capture FILE S [any|none]  listen S seconds, then save every SysEx the unit sent
+                          since the last send (or since this step) to FILE, the session's
+                          own RPC and diagnostics traffic left out; FILE is written even
+                          when nothing came. any: stop unless something came; none: stop
+                          if anything came
+    ping                  the unit's product, name and OS version (RPC Ping, read-only)
     save-project N NAME SEQ   keys SEQ save the project into empty slot N (the
                           naming screen's YES ends it); then it is renamed NAME
     say TEXT              print TEXT
@@ -106,6 +112,7 @@ class Tap:
     def __init__(self, port):
         self.port = port
         self.seen = []
+        self.since = None                # a list while a capture step is listening
 
     def send(self, data):
         self.port.send(data)
@@ -116,15 +123,27 @@ class Tap:
     def receive(self, seconds=1.0, until=None):
         msgs = self.port.receive(seconds, until)
         self.seen.extend(msgs)
+        if self.since is not None:
+            self.since.extend(msgs)
         return msgs
 
     def close(self):
         self.port.close()
 
 
+def ours(m):
+    """The session's own traffic: RPC (elkrpc) or digihealth's diagnostics channel."""
+    return m.startswith(elkrpc.HEADER) or (m.startswith(ELEKTRON) and m[4:6] == b'\x7d\x00')
+
+
 def is_dump(m):
     """Elektron SysEx that is neither the RPC channel nor digihealth's."""
     return m.startswith(ELEKTRON) and not m.startswith(elkrpc.HEADER) and m[4:6] != b'\x7d\x00'
+
+
+def save_syx(path, msgs):
+    with open(path, 'wb') as fh:
+        fh.write(b''.join(msgs))
 
 
 def load_syx(path):
@@ -337,8 +356,31 @@ class Session:
             if not msgs or not all(is_dump(m) for m in msgs):
                 raise ValueError('%s holds messages other than Elektron dumps' % a[0])
             writepolicy.before_dumps(self, msgs)
+            self.port.since = []             # a capture step after this keeps the replies
             self.send_dump(msgs)
             say('  sent %d messages, %d bytes' % (len(msgs), sum(map(len, msgs))))
+        elif op == 'capture':
+            # capture FILE S [any|none]: the replies to a send, or the silence, as evidence
+            want = a[2].lower() if len(a) > 2 else None
+            if want not in (None, 'any', 'none') or len(a) > 3:
+                raise ValueError('capture FILE S [any|none]')
+            if self.port.since is None:
+                self.port.since = []
+            end = time.monotonic() + float(a[1])
+            while time.monotonic() < end:
+                self.port.receive(min(0.05, max(end - time.monotonic(), 0)))
+            got = [m for m in self.port.since if m[:1] == b'\xF0' and not ours(m)]
+            self.port.since = []             # the next capture keeps only what comes after
+            save_syx(self.path(a[0]), got)
+            say('  captured %d messages, %d bytes' % (len(got), sum(map(len, got))))
+            if want == 'any' and not got:
+                raise AssertionError('no SysEx came back within %s s' % a[1])
+            if want == 'none' and got:
+                raise AssertionError('%d SysEx message(s) came back (saved in %s)'
+                                     % (len(got), os.path.basename(a[0])))
+        elif op == 'ping':
+            pid, name = self.rpc.ping()
+            say('  ping: product 0x%02X %r, OS %s' % (pid, name, self.rpc.version()))
         elif op == 'save-project':
             # save-project N NAME SEQ: SEQ ends on the unit's save (its naming screen's YES);
             # the new project is then renamed NAME over the data store.
