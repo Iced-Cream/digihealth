@@ -197,6 +197,46 @@ class SessionTest(unittest.TestCase):
                                   ('press', 'FUNC', None), ('tap', 'YES'), ('release', 'FUNC'),
                                   ('turn', 'A', -12, 4), ('cancel',)])
 
+    def test_key_session_reopened(self):
+        events, sessions = [], []
+
+        class Keys:
+            """A key session: `fail` maps an action to what it raises once."""
+            def __init__(self, diag):
+                self.n = len(sessions) + 1
+                sessions.append(self)
+                if Keys.busy:                    # the unit still loading: no answer to the open
+                    Keys.busy -= 1
+                    raise TimeoutError('no answer')
+
+            def tap(self, key, ms=None):
+                failure = Keys.fail.pop((self.n, key), None)
+                if failure:
+                    raise failure
+                events.append((self.n, 'tap', key))
+
+            def cancel(self):
+                events.append((self.n, 'cancel'))
+        Keys.busy = 0
+        Keys.fail = {(1, 'NO'): digirun._RequestRefused('refused: stale', digirun.STALE),
+                     (2, 'YES'): TimeoutError('no answer')}
+        out = io.StringIO()
+        with mock.patch.object(digirun, 'RemoteKeys', Keys), contextlib.redirect_stdout(out):
+            self.s.run('tap NO')                 # stale: a new session, NO once more
+            self.s.step('tap YES')               # sent, then no answer: not sent again
+            Keys.busy = 2
+            self.s.step('tap NO')                # the next key opens a session, waiting while busy
+            self.s.close()
+        self.assertEqual(events, [(2, 'tap', 'NO'), (5, 'tap', 'NO'), (5, 'cancel')])
+        self.assertIn('key session stale', out.getvalue())
+        self.assertIn('no answer after the tap', out.getvalue())
+        self.assertEqual(out.getvalue().count('key session reopened'), 2)
+        # another refusal is the step's failure, as before
+        Keys.fail[(5, 'UP')] = digirun._RequestRefused('refused: busy', 3)
+        with mock.patch.object(digirun, 'RemoteKeys', Keys), self.assertRaisesRegex(ValueError, 'busy'):
+            self.s._keys = sessions[-1]
+            self.s.step('tap UP')
+
     def test_plan_screen_options(self):
         refs = Path(self.tmp.name, 'refs')
         self.s.refs, self.s.record_refs = str(refs), True

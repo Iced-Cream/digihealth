@@ -175,7 +175,9 @@ def decode_peek(p):
 
 
 class _RequestRefused(ValueError):
-    pass
+    def __init__(self, text, status=None):
+        super().__init__(text)
+        self.status = status             # the mod's status code (STATUS)
 
 
 class Diag:
@@ -218,7 +220,7 @@ class Diag:
             if r:
                 if r['status']:
                     raise _RequestRefused('the mod refused 0x%02x: %s'
-                                          % (cmd, STATUS.get(r['status'], r['status'])))
+                                          % (cmd, STATUS.get(r['status'], r['status'])), r['status'])
                 return r['payload']
         raise TimeoutError('no answer: is a firmware with digihealth installed?')
 

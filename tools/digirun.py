@@ -59,9 +59,11 @@ import elkrpc
 import midisock
 import unitdata
 import writepolicy
-from digiusb import Diag, RemoteKeys, decode_stats, key_sequence, peek, req_stats
+from digiusb import Diag, RemoteKeys, _RequestRefused, decode_stats, key_sequence, peek, req_stats
 
 ELEKTRON = bytes([0xF0, 0x00, 0x20, 0x3C])
+STALE = 4                     # the mod's refusal 'stale session or operation' (digiusb.STATUS)
+REOPEN_S = 15.0               # how long a new key session waits for a unit still busy (a load)
 
 
 def say(*args, **kw):
@@ -169,6 +171,7 @@ class Session:
         self.refs = None                 # folder of reference screens (.bin), for test plans
         self.record_refs = False         # expect-screen saves the screen as the reference
         self._keys = None
+        self._reopen = False             # the key session went away: the next one may wait
 
     def dump_request(self, kind, number=0):
         return unitdata.dump_request(kind, number)
@@ -200,14 +203,44 @@ class Session:
     @property
     def keys(self):
         if self._keys is None:
-            self._keys = RemoteKeys(self.diag)
+            end = time.monotonic() + (REOPEN_S if self._reopen else 0)
+            while True:
+                try:
+                    self._keys = RemoteKeys(self.diag)
+                    break
+                except TimeoutError:             # a unit busy loading answers nothing for a while
+                    if time.monotonic() >= end:
+                        raise
+            if self._reopen:
+                say('  key session reopened')
+                self._reopen = False
         return self._keys
+
+    def key(self, action, *args):
+        """One key action (RemoteKeys.<action>) in the key session, opened again when it went
+        away. Refused as stale (the action never ran: the firmware ended a hold's lease, or the
+        unit dropped its sessions): a new session and the same action once more. No answer
+        about an action that was sent (the YES that starts a project load, say): it is not
+        sent again; the session is dropped and the next key action opens a new one."""
+        keys = self.keys
+        try:
+            return getattr(keys, action)(*args)
+        except _RequestRefused as e:
+            if e.status != STALE:
+                raise
+            say('  key session stale (%s): reopening it, the %s once more' % (e, action))
+            self._keys, self._reopen = None, True
+            return getattr(self.keys, action)(*args)
+        except TimeoutError as e:
+            say('  no answer after the %s (%s): not sent again; a new key session for the next key'
+                % (action, e))
+            self._keys, self._reopen = None, True
 
     def close(self):
         if self._keys is not None:
             try:
                 self._keys.cancel()
-            except TimeoutError as e:           # e.g. the unit still busy saving: keep the first error
+            except (TimeoutError, _RequestRefused) as e:   # e.g. the unit still busy saving: keep the first error
                 say('  closing the key session: %s' % e)
             self._keys = None
 
@@ -235,10 +268,10 @@ class Session:
     def key_steps(self, text):
         for hold, tap in key_sequence(text):
             if hold:
-                self.keys.press(hold)
-            self.keys.tap(tap)
+                self.key('press', hold)
+            self.key('tap', tap)
             if hold:
-                self.keys.release(hold)
+                self.key('release', hold)
 
     def expect_screen(self, ref, wait=0.0, rows=None, settle=False):
         """Stop unless the screen equals the framebuffer in `ref` (in the refs folder if set),
@@ -288,17 +321,17 @@ class Session:
         op, a = words[0].lower(), words[1:]
         num = lambda s: int(s, 0)
         if op == 'tap':
-            self.keys.tap(a[0], num(a[1]) if len(a) > 1 else None)
+            self.key('tap', a[0], num(a[1]) if len(a) > 1 else None)
         elif op == 'hold':
-            self.keys.press(a[0], num(a[1]) if len(a) > 1 else None)
+            self.key('press', a[0], num(a[1]) if len(a) > 1 else None)
         elif op == 'release':
-            self.keys.release(a[0])
+            self.key('release', a[0])
         elif op == 'keys':
             self.key_steps(' '.join(a))
         elif op == 'turn':
             if not hasattr(self.keys, 'turn'):
                 raise ValueError('this digiusb.py has no encoder turns')
-            self.keys.turn(a[0].upper(), num(a[1]), num(a[2]) if len(a) > 2 else 1)
+            self.key('turn', a[0].upper(), num(a[1]), num(a[2]) if len(a) > 2 else 1)
         elif op == 'shot':
             s = self.shot(a[0])
             say('  %s: %dx%d, %d lit' % (a[0], s.w, s.h, s.lit()))
