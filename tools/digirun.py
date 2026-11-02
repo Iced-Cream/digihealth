@@ -23,11 +23,12 @@ Steps (one per line or separated by ';'; '#' starts a comment):
     keys SEQ              as digiusb.py keys: 'SETTINGS,DOWN,FUNC(YES)'
     turn ENC DELTA [STEP] encoder turn, where the digihealth build has them
     shot FILE             screenshot: .png (4x) or .bin (raw framebuffer)
-    expect-screen NAME [S] [rows=A-B] [settle]
+    expect-screen NAME [S] [rows=A-B] [cols=C-D] [settle]
                           stop unless the screen equals NAME.bin, retrying for S
                           seconds; a mismatch reports the differing rows and columns
                           and saves NAME-got.png and NAME-diff.png. rows=A-B compares
-                          rows A..B only; settle: a match must still hold 0.4 s later
+                          rows A..B only, cols=C-D columns C..D only; settle: a match
+                          must still hold 0.4 s later
     listen TEXT           the person listens for TEXT: nothing is sent until they have
                           finished (Enter; or, with DIGIRUN_LISTEN_FILE or
                           ANALOGRUN_LISTEN_FILE set, until a host removes that file)
@@ -82,12 +83,13 @@ def say(*args, **kw):
     print(*args, **kw)
 
 
-def screen_diff(got, want, w=128, h=64, rows=None):
+def screen_diff(got, want, w=128, h=64, rows=None, cols=None):
     """Two framebuffers -> (differing pixels as (y, x), a short text report); rows=(A, B)
-    compares only rows A..B."""
+    compares only rows A..B, cols=(C, D) only columns C..D."""
     g, r = elkrpc.Screen(w, h, got).rows(), elkrpc.Screen(w, h, want).rows()
     y_lo, y_hi = rows or (0, h - 1)
-    diff = [(y, x) for y in range(y_lo, y_hi + 1) for x in range(w) if g[y][x] != r[y][x]]
+    x_lo, x_hi = cols or (0, w - 1)
+    diff = [(y, x) for y in range(y_lo, y_hi + 1) for x in range(x_lo, x_hi + 1) if g[y][x] != r[y][x]]
     if not diff:
         return diff, 'identical'
     ys, xs = [d[0] for d in diff], [d[1] for d in diff]
@@ -306,9 +308,10 @@ class Session:
             if hold:
                 self.key('release', hold)
 
-    def expect_screen(self, ref, wait=0.0, rows=None, settle=False):
+    def expect_screen(self, ref, wait=0.0, rows=None, settle=False, cols=None):
         """Stop unless the screen equals the framebuffer in `ref` (in the refs folder if set),
-        retrying for `wait` s; rows=(A, B) compares only those rows; settle: a match counts
+        retrying for `wait` s; rows=(A, B) compares only those rows, cols=(C, D) only those
+        columns; settle: a match counts
         only when it still holds 0.4 s later. With record_refs, save the screen as `ref`."""
         ref = ref if ref.endswith('.bin') else ref + '.bin'
         refpath = os.path.join(self.refs, ref) if self.refs and not os.path.isabs(ref) else self.path(ref)
@@ -326,7 +329,9 @@ class Session:
         end = time.monotonic() + wait
 
         def same(g):
-            return g.pixels == want if rows is None else not screen_diff(g.pixels, want, g.w, g.h, rows)[0]
+            if rows is None and cols is None:
+                return g.pixels == want
+            return not screen_diff(g.pixels, want, g.w, g.h, rows, cols)[0]
         while True:
             while not same(got) and time.monotonic() < end:
                 time.sleep(0.2)
@@ -338,7 +343,7 @@ class Session:
             if same(got) or time.monotonic() >= end:
                 break
         if not same(got):
-            diff, text = screen_diff(got.pixels, want, got.w, got.h, rows)
+            diff, text = screen_diff(got.pixels, want, got.w, got.h, rows, cols)
             stem = self.path(os.path.splitext(os.path.basename(ref))[0])
             with open(stem + '-got.png', 'wb') as fh:
                 fh.write(got.png(4))
@@ -370,16 +375,20 @@ class Session:
             say('  %s: %dx%d, %d lit' % (a[0], s.w, s.h, s.lit()))
         elif op == 'expect-screen':
             settle = 'settle' in a[1:]
-            opts = [w for w in a[1:] if w.startswith('rows=')]
-            a = a[:1] + [w for w in a[1:] if w != 'settle' and not w.startswith('rows=')]
-            rows = None
-            if opts:
-                try:
-                    rows = tuple(int(v) for v in opts[0][5:].split('-'))
-                    assert len(rows) == 2 and 0 <= rows[0] <= rows[1] <= 63
-                except (ValueError, AssertionError):
-                    raise ValueError('rows=A-B with 0 <= A <= B <= 63, not %r' % opts[0])
-            self.expect_screen(a[0], float(a[1]) if len(a) > 1 else 0.0, rows, settle)
+            ranges = {}
+            for word in a[1:]:
+                key, _, val = word.partition('=')
+                if key in ('rows', 'cols') and _:
+                    top = 63 if key == 'rows' else 127
+                    try:
+                        lo, hi = (int(v) for v in val.split('-'))
+                        assert 0 <= lo <= hi <= top
+                    except (ValueError, AssertionError):
+                        raise ValueError('%s=A-B with 0 <= A <= B <= %d, not %r' % (key, top, word))
+                    ranges[key] = (lo, hi)
+            a = a[:1] + [w for w in a[1:] if w != 'settle' and not w.startswith(('rows=', 'cols='))]
+            self.expect_screen(a[0], float(a[1]) if len(a) > 1 else 0.0, ranges.get('rows'), settle,
+                               ranges.get('cols'))
         elif op == 'cc':
             self.cc(*map(num, a))
         elif op == 'nrpn':

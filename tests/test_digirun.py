@@ -248,6 +248,9 @@ class SessionTest(unittest.TestCase):
         self.s.step('expect-screen home rows=0-63')
         with self.assertRaisesRegex(ValueError, 'rows=A-B'):
             self.s.step('expect-screen home rows=9-3')
+        self.s.step('expect-screen home rows=0-63 cols=32-120')
+        with self.assertRaisesRegex(ValueError, 'cols=A-B'):
+            self.s.step('expect-screen home cols=0-128')
 
     def test_listen_waits_for_the_host(self):
         flag = Path(self.tmp.name, 'listen.json')
@@ -343,6 +346,8 @@ class SessionTest(unittest.TestCase):
         diff, text = digirun.screen_diff(lit, blank, w, h)
         self.assertEqual(diff, [(3, 5)])
         self.assertTrue(text.startswith('1 pixels differ in rows 3-3, columns 5-5'))
+        self.assertEqual(digirun.screen_diff(lit, blank, w, h, cols=(6, 127))[0], [])   # column 5 left out
+        self.assertEqual(digirun.screen_diff(lit, blank, w, h, rows=(0, 10), cols=(0, 5))[0], [(3, 5)])
         self.assertIn('\n    +', text)
 
 
