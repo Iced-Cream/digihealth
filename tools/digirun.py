@@ -18,7 +18,8 @@ Steps (one per line or separated by ';'; '#' starts a comment):
     hold KEY [MS]         press; the firmware lets go after MS (default its maximum, 2 s)
     release KEY
     keys SEQ              as digiusb.py keys: 'SETTINGS,DOWN,FUNC(YES)'
-    turn ENC DELTA [STEP] encoder turn, where the digihealth build has them
+    turn ENC DELTA [STEP] encoder turn, where the digihealth build has them; says whether the
+                          screen changed (a value can need about 25 counts per step)
     shot FILE             screenshot: .png (4x) or .bin (raw framebuffer)
     expect-screen NAME [S] [rows=A-B] [settle]
                           stop unless the screen equals NAME.bin, retrying for S
@@ -70,6 +71,7 @@ from digiusb import Diag, RemoteKeys, _RequestRefused, decode_stats, key_sequenc
 ELEKTRON = bytes([0xF0, 0x00, 0x20, 0x3C])
 STALE = 4                     # the mod's refusal 'stale session or operation' (digiusb.STATUS)
 REOPEN_S = 15.0               # how long a new key session waits for a unit still busy (a load)
+TURN_SETTLE_S = 1.0           # how long after a turn its screen may take to change
 
 
 def say(*args, **kw):
@@ -284,6 +286,36 @@ class Session:
         time.sleep(ms / 1000)
         self.port.send_short(0x80 | (ch - 1), note, 0)
 
+    def turn(self, enc, delta, step=1):
+        """An encoder turn, then what it did to the screen: a turn too small for one step of
+        the value under the encoder (some take about 25 counts) is accepted and completes,
+        yet changes nothing, so the step says so rather than only that it ran."""
+        try:
+            before = self.rpc.screenshot()
+        except TimeoutError:
+            before = None
+        self.key('turn', enc, delta, step)
+        if before is None:
+            say('  turn %s %d: %d counts sent (no screenshot to compare)' % (enc, delta, abs(delta)))
+            return
+        end = time.monotonic() + TURN_SETTLE_S
+        while True:
+            try:
+                got = self.rpc.screenshot()
+            except TimeoutError:
+                say('  turn %s %d: %d counts sent (no screenshot after it)' % (enc, delta, abs(delta)))
+                return
+            if got.pixels != before.pixels or time.monotonic() >= end:
+                break
+            time.sleep(0.1)
+        if got.pixels == before.pixels:
+            say('  turn %s %d: %d counts sent, screen unchanged %.0f s later (too few counts '
+                'for one step of that value, or it is at its limit)' % (enc, delta, abs(delta),
+                                                                         TURN_SETTLE_S))
+        else:
+            text = screen_diff(got.pixels, before.pixels, got.w, got.h)[1].split('\n')[0]
+            say('  turn %s %d: %d counts sent, screen changed (%s)' % (enc, delta, abs(delta), text))
+
     def key_steps(self, text):
         for hold, tap in key_sequence(text):
             if hold:
@@ -350,7 +382,7 @@ class Session:
         elif op == 'turn':
             if not hasattr(self.keys, 'turn'):
                 raise ValueError('this digiusb.py has no encoder turns')
-            self.key('turn', a[0].upper(), num(a[1]), num(a[2]) if len(a) > 2 else 1)
+            self.turn(a[0].upper(), num(a[1]), num(a[2]) if len(a) > 2 else 1)
         elif op == 'shot':
             s = self.shot(a[0])
             say('  %s: %dx%d, %d lit' % (a[0], s.w, s.h, s.lit()))

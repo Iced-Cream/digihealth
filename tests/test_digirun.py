@@ -190,12 +190,31 @@ class SessionTest(unittest.TestCase):
         send = unit.send
         unit.send = lambda d: (events.append(('rpc',)) if elkrpc.parse(d) else None, send(d))
         self.s._keys = Keys()
-        with contextlib.redirect_stdout(io.StringIO()):
+        with contextlib.redirect_stdout(io.StringIO()), mock.patch.object(digirun, 'TURN_SETTLE_S', 0):
             self.s.run('hold FUNC 1500; shot held.png; release FUNC; keys FUNC(YES); turn a -12 4')
         self.s.close()
         self.assertEqual(events, [('press', 'FUNC', 1500), ('rpc',), ('release', 'FUNC'),
                                   ('press', 'FUNC', None), ('tap', 'YES'), ('release', 'FUNC'),
-                                  ('turn', 'A', -12, 4), ('cancel',)])
+                                  ('rpc',), ('turn', 'A', -12, 4), ('rpc',), ('cancel',)])
+
+    def test_turn_says_whether_the_screen_changed(self):
+        unit = self.unit
+
+        class Keys:
+            def turn(self, encoder, delta, step=1):
+                if abs(delta) >= 25:             # one step of the value: it is redrawn
+                    unit.pixels = bytes(len(unit.pixels))
+
+            def cancel(self):
+                pass
+        self.s._keys = Keys()
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out), mock.patch.object(digirun, 'TURN_SETTLE_S', 0.2):
+            self.s.step('turn A 10')
+            self.s.step('turn A 100')
+        lines = out.getvalue().splitlines()
+        self.assertIn('turn A 10: 10 counts sent, screen unchanged', lines[0])
+        self.assertIn('turn A 100: 100 counts sent, screen changed (192 pixels differ', lines[1])
 
     def test_key_session_reopened(self):
         events, sessions = [], []
